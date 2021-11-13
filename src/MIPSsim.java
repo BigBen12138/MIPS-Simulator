@@ -1,4 +1,5 @@
 /* On my honor, I have neither given nor received unauthorized aid on this assignment */
+
 import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.*;
@@ -59,8 +60,12 @@ public class MIPSsim {
 
 	public String simulate() {
 		if (this.instructions != null) {
-			Simulator simulator = new Simulator(instructions, data, 0);
-			return simulator.simulate();
+			//Simulator simulator = new Simulator(instructions, data, 0);
+			//return simulator.simulate();
+			Pipeline pipeline = new Pipeline(data, instructions);
+			String simulate = pipeline.simulate();
+			System.out.println(simulate);
+			return simulate;
 		}
 		return "";
 	}
@@ -184,8 +189,6 @@ public class MIPSsim {
 				instruction.setInstruction(String.valueOf(instruction.getValue()));
 			}
 		}
-
-
 	}
 
 	/**
@@ -343,7 +346,6 @@ public class MIPSsim {
 			}
 			return temp;
 		}*/
-
 		private void fillData(List<Instruction> data) {
 			for (int i = 0, len = data.size(); i < len; i++) {
 				this.data[i] = data.get(i).getValue();
@@ -351,6 +353,679 @@ public class MIPSsim {
 			//System.out.println(Arrays.toString(this.data));
 		}
 
+	}
+
+	public static class Pipeline {
+
+		public Integer PC;
+
+		public static Integer BASE;
+
+		private final List<Instruction> instructions;
+
+		private final List<Instruction> preIssue;
+
+		private final Deque<Buffer> preALU1;
+
+		private Buffer preMEM = null;
+
+		private Buffer postMEM = null;
+
+		private final Deque<Buffer> preALU2;
+
+		private Buffer postALU = null;
+
+		public static Boolean IF = true;
+
+		private class IFUnit {
+			private Instruction waiting = null;
+			private Instruction executed = null;
+
+			void push() {
+				this.executed = waiting;
+				waiting = null;
+			}
+
+			void clear() {
+				this.executed = null;
+				this.waiting = null;
+			}
+
+			boolean hasHazards() {
+				Integer rs = waiting.getRs(),
+						rt = waiting.getRt();
+				switch (waiting.getOperation()) {
+					case "JR", "BLTZ", "BGTZ" -> {
+						if (hasDataHazards(rs) ) return true;
+					}
+					case "BEQ" -> {
+						if (hasDataHazards(rs) || hasDataHazards(rt)) return true;
+					}
+				}
+				return false;
+			}
+		}
+
+		private IFUnit ifUnit = new IFUnit();
+
+		private int dataAddr;
+
+		private class Buffer {
+			Instruction instruction = null;
+			Integer operant1 = null;
+			Integer operant2 = null;
+			Integer dest = null;
+			Integer value = null;
+
+			public Buffer() {
+			}
+
+			public Buffer(Instruction instruction, Integer operant1, Integer operant2, Integer value) {
+				this.instruction = instruction;
+				this.operant1 = operant1;
+				this.operant2 = operant2;
+				this.value = value;
+			}
+
+			public Instruction getInstruction() {
+				return instruction;
+			}
+
+			public Buffer setInstruction(Instruction instruction) {
+				this.instruction = instruction;
+				return this;
+			}
+
+			public Integer getOperant1() {
+				return operant1;
+			}
+
+			public Buffer setOperant1(Integer operant1) {
+				this.operant1 = operant1;
+				return this;
+			}
+
+			public Integer getOperant2() {
+				return operant2;
+			}
+
+			public Buffer setOperant2(Integer operant2) {
+				this.operant2 = operant2;
+				return this;
+			}
+
+			public Integer getDest() {
+				return dest;
+			}
+
+			public void setDest(Integer dest) {
+				this.dest = dest;
+				registerStatus[dest] = true;
+			}
+
+			public Integer getValue() {
+				return value;
+			}
+
+			public Buffer setValue(Integer value) {
+				this.value = value;
+				return this;
+			}
+		}
+
+		private static boolean BREAK = false;
+
+		private boolean[] registerStatus;
+
+		private boolean[] insRegisterStatus;
+
+		private Integer[] register;
+
+		private Integer[] memory;
+
+		private int cycle;
+
+		public Pipeline(List<Instruction> memory, List<Instruction> instructions) {
+			PC = 256;
+			this.instructions = instructions;
+			preIssue = new LinkedList<>();
+			preALU1 = new LinkedList<>();
+			preALU2 = new LinkedList<>();
+			registerStatus = new boolean[32];
+			insRegisterStatus = new boolean[32];
+			BASE = this.instructions.get(0).getAddress();
+			register = new Integer[32];
+			Arrays.fill(register, 0);
+			fillData(memory);
+			this.dataAddr = memory.get(0).getAddress();
+			PC = BASE;
+			cycle = 1;
+
+		}
+
+		public String simulate() {
+			StringBuilder builder = new StringBuilder();
+			while (!BREAK && cycle < 10) {
+				wb();
+
+				mem();
+
+				alu();
+
+				issue();
+
+				instuctionFetch();
+
+				String temp = print();
+				builder.append(temp);
+				cycle += 1;
+			}
+			return builder.toString();
+		}
+
+		private String print() {
+			return Printer.getCycle(cycle) +
+					Printer.getIfUnit(ifUnit.waiting, ifUnit.executed) +
+					Printer.getPreIssue(preIssue) +
+					Printer.getPreAlu1(preALU1) +
+					Printer.getPreMem(preMEM) +
+					Printer.getPostMem(postMEM) +
+					Printer.getPreAlu2(preALU2) +
+					Printer.getPostAlu2(postALU) +
+					Printer.getRegisters(register) +
+					Printer.getData(memory, dataAddr);
+		}
+
+		/**
+		 * 获取指令
+		 * <p>
+		 * 一次可以获取2条指令
+		 * <p>
+		 * 当第一条指令为J Type指令时，不取第二条指令
+		 * 当第二条指令为J Type指令时，第一条指令正常取
+		 * <p>
+		 * 获取到BREAK指令时，停止
+		 * <p>
+		 * 所有的J Type指令、BREAK、NOP都不会进入到preIssue
+		 */
+		public void instuctionFetch() {
+			executeJ();
+			if (IF) {
+				Instruction instruction1 = this.instructions.get(next());
+				Instruction instruction2 = null;
+				if (!isJType(instruction1)) {
+					preIssue.add(instruction1);
+					instruction2 = this.instructions.get(next());
+					if (null != instruction2 && isJType(instruction2)) {
+						//如果第二条指令是J Type，那么也留在IF Unit
+						ifUnit.waiting = instruction2;
+						IF = false;
+					} else {
+						preIssue.add(instruction2);
+					}
+				} else {
+					//如果第一条指令是跳转指令，那么直接留在IF Unit
+					ifUnit.waiting = instruction1;
+					IF = false;
+				}
+			}
+
+
+		}
+
+		private void executeJ() {
+			if (ifUnit.waiting == null || ifUnit.hasHazards()) {
+				return;
+			}
+			ifUnit.push();
+			Integer rs = ifUnit.executed.getRs(),
+					rt = ifUnit.executed.getRt();
+			if ("J".equals(ifUnit.executed.getOperation())) {
+				this.PC = ifUnit.executed.getTarget();
+			} else if (!hasDataHazards(rs)) {
+				Integer value = ifUnit.executed.getValue();
+				switch (ifUnit.executed.getOperation()) {
+					case "BLTZ" -> {
+						if (register[rs] < 0) {
+							PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
+							IF = true;
+						}
+					}
+					case "BGTZ" -> {
+						if (register[rs] > 0) {
+							PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
+							IF = true;
+						}
+					}
+					case "BEQ" -> {
+						if (!hasDataHazards(rt)) {
+							if (register[rs].equals(register[rt])) {
+								PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
+								IF = true;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		private boolean isJType(Instruction instruction) {
+			switch (instruction.getOperation()) {
+				case "J", "JR", "BEQ", "BLTZ", "BGTZ", "NOP" -> {
+					return true;
+				}
+				case "BREAK" -> {
+					IF = false;
+					return true;
+				}
+				default -> {
+					return false;
+				}
+			}
+		}
+
+		/**
+		 * 发射指令
+		 * <p>
+		 * 一次最多发射2条指令：1条LW/SW和1条ALU
+		 * <p>
+		 * 发射指令时，遍历preIssue
+		 * <p>
+		 * 1. 无结构风险：ALU1和ALU2占位满
+		 * <p>
+		 * 2. 检查寄存器，无WAW、WAR、RAW
+		 * <p>
+		 * 3. 2条指令同时发出时，也需要判断WAW、WAR、RAW
+		 * <p>
+		 * 4. MEM指令，所有源寄存器会在上一循环结束时准备好
+		 * <p>
+		 * 5. LW指令需要在等待先前的SW指令发射
+		 * <p>
+		 * 6. SW指令需要按照顺序发射 -> 前一条Store没有发射，其他Store就不能发射
+		 */
+		public void issue() {
+			int sum = 0;
+			boolean hasStore = false;
+			Instruction loadStore = null, alu = null;
+			int storeSum = 0;
+			Arrays.fill(insRegisterStatus, false);
+			for (int i = 0; i < preIssue.size() && sum < 2; i++) {
+				Instruction issuing = preIssue.get(i);
+				if (!hasStructHazards(issuing) && !hasDataHazards(issuing)) {
+					//可以发射
+					Buffer buffer = new Buffer();
+					buffer.setInstruction(issuing);
+					switch (issuing.getOperation()) {
+						case "LW", "SW" -> {
+							if (!hasStore && null == loadStore) {
+								loadStore = preIssue.remove(i);
+								buffer.setOperant1(register[issuing.getRs()])
+										.setOperant2(issuing.getOffset())
+										.setDest(issuing.getRt());
+								preALU1.offer(buffer);
+								sum++;
+							}
+						}
+						default -> {
+							if (null == alu) {
+								alu = preIssue.remove(i);
+								sum++;
+								switch (issuing.getOperation()) {
+									case "SLL", "SRL", "SRA" -> {
+										buffer.setOperant1(register[issuing.getRs()])
+												.setOperant2(issuing.getShift())
+												.setDest(issuing.getRd());
+
+									}
+									case "ADDI", "ANDI", "ORI", "XORI" -> {
+										buffer.setOperant1(register[issuing.getRs()])
+												.setOperant2(register[issuing.getImmediate()])
+												.setDest(issuing.getRt());
+									}
+									default -> {
+										buffer.setOperant1(register[issuing.getRs()])
+												.setOperant2(register[issuing.getRt()])
+												.setDest(issuing.getRd());
+
+									}
+								}
+								preALU2.offer(buffer);
+							}
+						}
+					}
+					i--;
+				} else {
+					if ("SW".equals(issuing.getOperation())) {
+						hasStore = true;
+					}
+				}
+			}
+		}
+
+		/**
+		 * 判断待发射指令前后是否有数据风险
+		 * <p>
+		 * 当前待发射的指令中，如果操作数与前面有RAW，需要进行等待
+		 *
+		 * @return
+		 */
+		private boolean hasRegisterHazards(Integer id) {
+			for (int i = 0; i < insRegisterStatus.length; i++) {
+				if (id != null && insRegisterStatus[id]) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		private void lockRegisterStatus(int id) {
+			this.registerStatus[id] = true;
+		}
+
+		private void freeInsRegisterStatus(int... argv) {
+			for (int j : argv) {
+				insRegisterStatus[j] = false;
+			}
+		}
+
+		private void freeRegisterStatus(int... argv) {
+			for (int i : argv) {
+				registerStatus[i] = false;
+			}
+		}
+
+		/**
+		 * 判断是否有数据风险
+		 * <p>
+		 * WAR 未发射的指令的目的寄存器，不能与它前面未发射的源寄存器相同
+		 * <p>
+		 * RAW 源寄存器被占用，不可以先去读
+		 * <p>
+		 * WAW 目的寄存器被占用
+		 * <p>
+		 * 对于三寄存器的指令，需要判断rs, rt， rd是否被占用
+		 *
+		 * @param issuing
+		 * @return
+		 */
+		private boolean hasDataHazards(Instruction issuing) {
+			Integer rs = issuing.getRs(),
+					rt = issuing.getRt(),
+					rd = issuing.getRd(),
+					sa = issuing.getShift();
+			//寄存器被占用，则有数据风险
+			//首先判断该寄存器能不能发射
+			//如果registerStatus有加锁，那么就不能发射
+			switch (issuing.getOperation()) {
+				case "ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR", "SLT" -> {
+					if (hasDataHazards(rd) || hasDataHazards(rs) || hasDataHazards(rt)
+							|| hasRegisterHazards(rd) || hasRegisterHazards(rs) || hasRegisterHazards(rt)) {
+						insRegisterStatus[rd] = true;
+						return true;
+					}
+				}
+				case "SW", "LW", "ADDI", "ANDI", "ORI", "XORI" -> {
+					if (hasDataHazards(rs) || hasDataHazards(rt)
+							|| hasRegisterHazards(rs) || hasRegisterHazards(rt)) {
+						insRegisterStatus[rt] = true;
+						return true;
+					}
+				}
+				case "SLL", "SRL", "SRA" -> {
+					if (hasDataHazards(rt) || hasDataHazards(rd)
+							|| hasRegisterHazards(rt) || hasRegisterHazards(rd)) {
+						insRegisterStatus[rd] = true;
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
+		/**
+		 * 判断是否有结构风险
+		 * <p>
+		 * MEM指令需要判断ALU1的队列容量
+		 * <p>
+		 * ALU指令需要判断ALU2的队列容量
+		 *
+		 * @param instruction 待发射的指令
+		 * @return 是否有结构风险
+		 */
+		private boolean hasStructHazards(Instruction instruction) {
+			switch (instruction.getOperation()) {
+				case "LW", "SW" -> {
+					return !preALU1.isEmpty();
+				}
+				default -> {
+					return !preALU2.isEmpty();
+				}
+			}
+		}
+
+		/**
+		 * 检查是否存在数据风险
+		 *
+		 * @param id 需要判断的寄存器id
+		 * @return 存在风险True
+		 */
+		private boolean hasDataHazards(Integer id) {
+			for (int i = 0; i < registerStatus.length; i++) {
+				if (id != null && registerStatus[id]) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		/**
+		 * ALU操作
+		 * <p>
+		 * 分为ALU1和ALU2
+		 * ALU1操作Load和Store指令
+		 */
+		public void alu() {
+			//ALU1 一次只能从preALU1中取一条
+			if (!preALU1.isEmpty()) {
+				Buffer loadStore = preALU1.poll();
+				//load store指令 计算地址
+				int result = Category.operationMap.get(loadStore.instruction.getOperation()).operation(loadStore.getOperant1(), loadStore.getOperant2());
+				loadStore.setValue(result);
+				preMEM = loadStore;
+			}
+
+
+			//ALU2 一次只能从preALU2中取一条
+			if (!preALU2.isEmpty()) {
+				Buffer alu = preALU2.poll();
+				//TODO: alu
+				Integer result = calculate(alu);
+				//操作结束后将值存入postALU2
+				alu.setValue(result);
+				postALU = alu;
+			}
+
+		}
+
+		private Integer calculate(Buffer buffer) {
+			String operation = buffer.getInstruction().getOperation();
+			Integer op1 = buffer.operant1,
+					op2 = buffer.operant2;
+			return Category.operationMap.get(operation).operation(op1, op2);
+		}
+
+		public void mem() {
+			if (preMEM != null) {
+
+				Instruction instruction = preMEM.getInstruction();
+				Integer value = preMEM.getValue();
+				if (value != null) {
+					switch (instruction.getOperation()) {
+						case "LW" -> {
+							value = memory[(value + register[instruction.getRs()] - dataAddr) / 4];
+							postMEM.setInstruction(instruction).setValue(value);
+						}
+						case "SW" -> {
+							memory[(value + register[instruction.getRs()] - dataAddr) / 4] = register[instruction.getRt()];
+						}
+					}
+				}
+			}
+		}
+
+		public void wb() {
+			if (null != postMEM) {
+				int value = postMEM.getValue();
+				Integer dest = postMEM.getDest();
+				writeToRegister(dest, value);
+				freeRegisterStatus(dest);
+				postMEM = null;
+			}
+			if (null != postALU) {
+				int value = postALU.getValue();
+				Integer dest = postALU.getDest();
+				writeToRegister(dest, value);
+				freeRegisterStatus(dest);
+				postALU = null;
+			}
+		}
+
+
+
+		private void writeToRegister(Integer id, Integer value) {
+			this.register[id] = value;
+		}
+
+		public Integer next() {
+			int next = (PC - BASE) / 8;
+			PC += 8;
+			return next;
+		}
+
+		private void fillData(List<Instruction> data) {
+			this.memory = new Integer[data.size()];
+			for (int i = 0, len = data.size(); i < len; i++) {
+				this.memory[i] = data.get(i).getValue();
+			}
+			//System.out.println(Arrays.toString(this.data));
+		}
+
+		static class Printer {
+			public static String SEPERATE_LINE = "--------------------" + System.lineSeparator();
+			public static String CYCLE = "Cycle:%d" + System.lineSeparator() + System.lineSeparator();
+			public static String IF_UNIT = "IF Unit:" + System.lineSeparator()
+					+ "\tWaiting Instruction:%s" + System.lineSeparator()
+					+ "\tExecuted Instruction:%s" + System.lineSeparator();
+			public static String PRE_ISSUE = "Pre-Issue Queue:" + System.lineSeparator();
+
+			public static String ENTRY = "\tEntry %d: %s" + System.lineSeparator();
+
+			public static String PRE_ALU1 = "Pre-ALU1 Queue:" + System.lineSeparator();
+
+			public static String PRE_MEM = "Pre-MEM Queue:%s" + System.lineSeparator();
+
+			public static String POST_MEM = "Post-MEM Queue:%s" + System.lineSeparator();
+
+			public static String PRE_ALU2 = "Pre-ALU2 Queue:" + System.lineSeparator();
+
+			public static String POST_ALU2 = "Post-ALU2 Queue:%s" + System.lineSeparator() + System.lineSeparator();
+
+			public static final String REGISTERS = "Registers" + System.lineSeparator()
+					+ "R00:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" + System.lineSeparator()
+					+ "R08:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" + System.lineSeparator()
+					+ "R16:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" + System.lineSeparator()
+					+ "R24:\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d" + System.lineSeparator()
+					+ System.lineSeparator() + "Data" + System.lineSeparator();
+			public static final String DATA = "%d:\t%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d" + System.lineSeparator();
+
+			public static String getCycle(int cycle) {
+				return SEPERATE_LINE + String.format(CYCLE, cycle);
+			}
+
+			public static String getIfUnit(Instruction waiting, Instruction executed) {
+				if (waiting != null && executed != null) {
+					return String.format(IF_UNIT, waiting.toString(), executed.toString());
+				} else if (waiting != null) {
+					return String.format(IF_UNIT, waiting.toString(), "");
+				} else if (executed != null) {
+					return String.format(IF_UNIT, "", executed.toString());
+				}
+				return String.format(IF_UNIT, "", "");
+			}
+
+			public static String getPreIssue(List<Instruction> list) {
+				StringBuilder template = new StringBuilder(PRE_ISSUE);
+				int i = 0;
+				for (; i < list.size(); i++) {
+					template.append(String.format(ENTRY, i, list.get(i).toString()));
+				}
+				for (; i < 4; i++) {
+					template.append(String.format(ENTRY, i, ""));
+				}
+				return template.toString();
+			}
+
+			public static String getPreAlu1(Deque<Buffer> deque) {
+				StringBuilder template = new StringBuilder(PRE_ALU1);
+				int i = 0;
+				for (Buffer buffer : deque) {
+					template.append(String.format(ENTRY, i, buffer.instruction.toString()));
+					i++;
+				}
+				for (; i < 2; i++) {
+					template.append(String.format(ENTRY, i, ""));
+				}
+				return template.toString();
+			}
+
+			public static String getPreAlu2(Deque<Buffer> deque) {
+				StringBuilder template = new StringBuilder(PRE_ALU2);
+				int i = 0;
+				for (Buffer buffer : deque) {
+					template.append(String.format(ENTRY, i, buffer.instruction.toString()));
+					i++;
+				}
+				for (; i < 2; i++) {
+					template.append(String.format(ENTRY, i, ""));
+				}
+				return template.toString();
+			}
+
+			public static String getPreMem(Buffer buffer) {
+				if (buffer != null) {
+					return String.format(PRE_MEM, " " + buffer.instruction.toString());
+				}
+				return String.format(PRE_MEM, "");
+			}
+
+			public static String getPostMem(Buffer buffer) {
+				if (buffer != null) {
+					return String.format(POST_MEM, " " + buffer.instruction.toString());
+				}
+				return String.format(POST_MEM, "");
+			}
+
+			public static String getPostAlu2(Buffer buffer) {
+				if (buffer != null) {
+					return String.format(POST_ALU2, " " + buffer.instruction.toString());
+				}
+				return String.format(POST_ALU2, "");
+			}
+
+			public static String getRegisters(Integer[] registers) {
+				return String.format(REGISTERS, (Object[]) registers);
+			}
+
+			public static String getData(Integer[] data, int dataAddr) {
+				StringBuilder builder = new StringBuilder();
+				for (int i = 0; i < data.length; i += 8) {
+					builder.append(String.format(DATA, dataAddr + i * 4, data[i], data[i + 1], data[i + 2], data[i + 3], data[i + 4], data[i + 5], data[i + 6], data[i + 7]));
+				}
+				return builder.toString();
+			}
+
+
+		}
 	}
 
 	//逻辑左移：
@@ -372,6 +1047,10 @@ public class MIPSsim {
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
+		//Deque<Integer> deque = new ArrayDeque<>(Arrays.asList(1, 2, 3, 4, 5));
+		//for (Integer integer : deque) {
+		//	System.out.println(integer);
+		//}
 	}
 }
 
@@ -503,6 +1182,14 @@ class Instruction {
 		return value;
 	}
 
+	public Integer getImmediate() {
+		return value;
+	}
+
+	public Integer getOffset() {
+		return getValue();
+	}
+
 	public void setValue(Integer value) {
 		this.value = value;
 	}
@@ -533,21 +1220,10 @@ class Instruction {
 
 	@Override
 	public String toString() {
-		return "Instruction{" +
-				"category=" + category +
-				", address=" + address +
-				", operation='" + operation + '\'' +
-				", rs=" + rs +
-				", rt=" + rt +
-				", rd=" + rd +
-				", shift=" + shift +
-				", func=" + func +
-				", value=" + value +
-				", target=" + target +
-				", instruction='" + instruction + '\'' +
-				'}';
+		return "[" + instruction + "]";
 	}
 }
+
 
 final class Category {
 	public static Map<String, Integer> categorySet;
@@ -585,6 +1261,10 @@ final class Category {
 			operationMap.put("SLL", (int rt, int sa) -> rt << sa);//逻辑左移
 			operationMap.put("SRL", (int rt, int sa) -> rt >>> sa);//逻辑右移
 			operationMap.put("SRA", (int rt, int sa) -> rt >> sa);//算术右移
+
+			operationMap.put("LW", (int rs, int offset) -> rs + Integer.parseUnsignedInt(Util.signedExtend(Util.int16toString(offset), 32), 2));
+
+			operationMap.put("SW", (int rs, int offset) -> rs + Integer.parseUnsignedInt(Util.signedExtend(Util.int16toString(offset), 32), 2));
 		}
 
 		/*
@@ -594,8 +1274,8 @@ final class Category {
 		 rs 00000 offset          5 5 16          BLTZ rs, offset
 		 rs 00000 offset          5 5 16          BGTZ rs, offset
 		 BREAK
-		 base rt offset           5 5 16          SW rt, offset(base)
-		 base rt offset           5 5 16          LW rt, offset(base)
+		 rs rt offset           5 5 16          SW rt, offset(rs)
+		 rs rt offset           5 5 16          LW rt, offset(rs)
 		 00000 rt rd sa           5 5 5 5       SLL rd, rt, sa
 		 00000 rt rd sa           5 5 5 5       SRL rd, rt, sa
 		 00000 rt rd sa           5 5 5 5       SRA rd, rt, sa
@@ -612,7 +1292,7 @@ final class Category {
 		 rs rt immediate          5 5 16          ADDI rt, rs, immediate
 		 rs rt immediate          5 5 16          ANDI rt, rs, immediate
 		 rs rt immediate          5 5 16          ORI rt, rs, immediate
-		 rs rt immediate          5 5 16          ANDI rt, rs, immediate*/
+		 rs rt immediate          5 5 16          XORI rt, rs, immediate*/
 	}
 
 	public static Integer getCategory(String category) {
@@ -716,7 +1396,7 @@ final class Util {
 				shift <<= 1;
 			}
 			if (value == 0) {
-				return -1 *( 1 << (len - 1));
+				return -1 * (1 << (len - 1));
 			}
 			value = value + (flag * shift);
 			return value;
@@ -750,6 +1430,5 @@ final class Util {
 		s = "0".repeat(32 - s.length()) + s;
 		return s.substring(32 - bits);
 	}
-
-
 }
+
