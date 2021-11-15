@@ -363,15 +363,17 @@ public class MIPSsim {
 
 		private final List<Instruction> instructions;
 
-		private final List<Instruction> preIssue;
+		private IFUnit ifUnit = new IFUnit();
 
-		private final Deque<Buffer> preALU1;
+		private List<Instruction> preIssue = null;
+
+		private Deque<Buffer> preALU1 = null;
 
 		private Buffer preMEM = null;
 
 		private Buffer postMEM = null;
 
-		private final Deque<Buffer> preALU2;
+		private Deque<Buffer> preALU2 = null;
 
 		private Buffer postALU = null;
 
@@ -392,23 +394,42 @@ public class MIPSsim {
 			}
 
 			boolean hasHazards() {
-				Integer rs = waiting.getRs(),
-						rt = waiting.getRt();
-				switch (waiting.getOperation()) {
-					case "JR", "BLTZ", "BGTZ" -> {
-						if (hasDataHazards(rs) ) return true;
-					}
-					case "BEQ" -> {
-						if (hasDataHazards(rs) || hasDataHazards(rt)) return true;
+				if (waiting != null) {
+					Integer rs = waiting.getRs(),
+							rt = waiting.getRt();
+					switch (waiting.getOperation()) {
+						case "JR", "BLTZ", "BGTZ" -> {
+							if (hasDataHazards(rs)) return true;
+						}
+						case "BEQ" -> {
+							if (hasDataHazards(rs) || hasDataHazards(rt)) return true;
+						}
 					}
 				}
 				return false;
 			}
 		}
 
-		private IFUnit ifUnit = new IFUnit();
-
 		private int dataAddr;
+
+		private static class Component {
+			public static Instruction waitingInstruction = null;
+
+			public static Instruction executed;
+
+			public static Queue<Instruction> preIssue = new ArrayDeque<>();
+
+			public static Queue<Buffer> preALU1 = new ArrayDeque<>();
+
+			public static Buffer preMEM = null;
+
+			public static Buffer postMEM = null;
+
+			public static Queue<Buffer> preALU2 = new ArrayDeque<>();
+
+			public static Buffer postALU = null;
+
+		}
 
 		private class Buffer {
 			Instruction instruction = null;
@@ -505,20 +526,35 @@ public class MIPSsim {
 
 		public String simulate() {
 			StringBuilder builder = new StringBuilder();
-			while (!BREAK && cycle < 10) {
-				wb();
-
-				mem();
-
-				alu();
+			while (!BREAK && cycle < 29) {
+				instuctionFetch();
 
 				issue();
 
-				instuctionFetch();
+				alu();
+
+				mem();
+
+				wb();
+				/**
+				 *
+				 * fetch
+				 *
+				 * issue
+				 *
+				 * mem
+				 *
+				 * wb
+				 *
+				 * alu
+				 *
+				 *
+				 * */
 
 				String temp = print();
+				System.out.println(temp);
 				builder.append(temp);
-				cycle += 1;
+				cycle++;
 			}
 			return builder.toString();
 		}
@@ -551,62 +587,85 @@ public class MIPSsim {
 		public void instuctionFetch() {
 			executeJ();
 			if (IF) {
-				Instruction instruction1 = this.instructions.get(next());
-				Instruction instruction2 = null;
-				if (!isJType(instruction1)) {
-					preIssue.add(instruction1);
-					instruction2 = this.instructions.get(next());
-					if (null != instruction2 && isJType(instruction2)) {
-						//如果第二条指令是J Type，那么也留在IF Unit
-						ifUnit.waiting = instruction2;
-						IF = false;
+				if (preIssue.size() + Component.preIssue.size() <= 4) {
+					Instruction instruction1 = this.instructions.get(next());
+					Instruction instruction2 = null;
+					if (!isJType(instruction1)) {
+						Component.preIssue.offer(instruction1);
+						//preIssue.add(instruction1);
+						if (preIssue.size() + Component.preIssue.size() <= 4) {
+							instruction2 = this.instructions.get(next());
+							if (null != instruction2 && isJType(instruction2)) {
+								//如果第二条指令是J Type，那么也留在IF Unit
+								//ifUnit.waiting = instruction2;
+								Component.waitingInstruction = instruction2;
+								IF = false;
+							} else {
+								Component.preIssue.offer(instruction2);
+								//preIssue.add(instruction2);
+							}
+						}
 					} else {
-						preIssue.add(instruction2);
+						//如果第一条指令是跳转指令，那么直接留在IF Unit
+						//ifUnit.waiting = instruction1;
+						Component.waitingInstruction = instruction1;
+						IF = false;
 					}
-				} else {
-					//如果第一条指令是跳转指令，那么直接留在IF Unit
-					ifUnit.waiting = instruction1;
-					IF = false;
 				}
 			}
+			//  issue: ADD R1, R0, R0
 
+			// mem: ADD R1, R2, R3
 
 		}
 
 		private void executeJ() {
-			if (ifUnit.waiting == null || ifUnit.hasHazards()) {
+			if (ifUnit.hasHazards()) {
 				return;
 			}
-			ifUnit.push();
-			Integer rs = ifUnit.executed.getRs(),
-					rt = ifUnit.executed.getRt();
-			if ("J".equals(ifUnit.executed.getOperation())) {
-				this.PC = ifUnit.executed.getTarget();
-			} else if (!hasDataHazards(rs)) {
-				Integer value = ifUnit.executed.getValue();
-				switch (ifUnit.executed.getOperation()) {
-					case "BLTZ" -> {
-						if (register[rs] < 0) {
-							PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
-							IF = true;
-						}
-					}
-					case "BGTZ" -> {
-						if (register[rs] > 0) {
-							PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
-							IF = true;
-						}
-					}
-					case "BEQ" -> {
-						if (!hasDataHazards(rt)) {
-							if (register[rs].equals(register[rt])) {
+			if (ifUnit.waiting != null) {
+				Component.executed = ifUnit.waiting;
+				ifUnit.waiting = null;
+			}
+			if (ifUnit.executed != null) {
+				Integer rs = ifUnit.executed.getRs(),
+						rt = ifUnit.executed.getRt();
+				if ("J".equals(ifUnit.executed.getOperation())) {
+					this.PC = ifUnit.executed.getTarget();
+					ifUnit.executed = null;
+					IF = true;
+				} else if (!hasDataHazards(rs)) {
+					IF = true;
+					Integer value = ifUnit.executed.getValue();
+					switch (ifUnit.executed.getOperation()) {
+						case "BLTZ" -> {
+							if (register[rs] < 0) {
 								PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
 								IF = true;
 							}
 						}
+						case "BGTZ" -> {
+							if (register[rs] > 0) {
+								PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
+								IF = true;
+							}
+						}
+						case "BEQ" -> {
+							if (!hasDataHazards(rt)) {
+								if (register[rs].equals(register[rt])) {
+									PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
+									IF = true;
+								}
+							}
+						}
+						case "BREAK" -> {
+							BREAK = true;
+						}
 					}
+					ifUnit.executed = null;
 				}
 			}
+
 		}
 
 		private boolean isJType(Instruction instruction) {
@@ -650,6 +709,7 @@ public class MIPSsim {
 			int storeSum = 0;
 			Arrays.fill(insRegisterStatus, false);
 			for (int i = 0; i < preIssue.size() && sum < 2; i++) {
+				//一次只能发射一条ALU和LoadStore
 				Instruction issuing = preIssue.get(i);
 				if (!hasStructHazards(issuing) && !hasDataHazards(issuing)) {
 					//可以发射
@@ -658,28 +718,29 @@ public class MIPSsim {
 					switch (issuing.getOperation()) {
 						case "LW", "SW" -> {
 							if (!hasStore && null == loadStore) {
-								loadStore = preIssue.remove(i);
+								loadStore = preIssue.remove(i--);
 								buffer.setOperant1(register[issuing.getRs()])
 										.setOperant2(issuing.getOffset())
 										.setDest(issuing.getRt());
-								preALU1.offer(buffer);
+								//preALU1.offer(buffer);
+								Component.preALU1.offer(buffer);
 								sum++;
 							}
 						}
 						default -> {
 							if (null == alu) {
-								alu = preIssue.remove(i);
+								alu = preIssue.remove(i--);
 								sum++;
 								switch (issuing.getOperation()) {
 									case "SLL", "SRL", "SRA" -> {
-										buffer.setOperant1(register[issuing.getRs()])
+										buffer.setOperant1(register[issuing.getRt()])
 												.setOperant2(issuing.getShift())
 												.setDest(issuing.getRd());
 
 									}
 									case "ADDI", "ANDI", "ORI", "XORI" -> {
 										buffer.setOperant1(register[issuing.getRs()])
-												.setOperant2(register[issuing.getImmediate()])
+												.setOperant2(issuing.getImmediate())
 												.setDest(issuing.getRt());
 									}
 									default -> {
@@ -689,11 +750,12 @@ public class MIPSsim {
 
 									}
 								}
-								preALU2.offer(buffer);
+								Component.preALU2.offer(buffer);
+								//preALU2.offer(buffer);
 							}
 						}
 					}
-					i--;
+
 				} else {
 					if ("SW".equals(issuing.getOperation())) {
 						hasStore = true;
@@ -729,6 +791,7 @@ public class MIPSsim {
 		}
 
 		private void freeRegisterStatus(int... argv) {
+
 			for (int i : argv) {
 				registerStatus[i] = false;
 			}
@@ -795,10 +858,10 @@ public class MIPSsim {
 		private boolean hasStructHazards(Instruction instruction) {
 			switch (instruction.getOperation()) {
 				case "LW", "SW" -> {
-					return !preALU1.isEmpty();
+					return preALU1.size() > 2;
 				}
 				default -> {
-					return !preALU2.isEmpty();
+					return preALU2.size() > 2;
 				}
 			}
 		}
@@ -831,7 +894,8 @@ public class MIPSsim {
 				//load store指令 计算地址
 				int result = Category.operationMap.get(loadStore.instruction.getOperation()).operation(loadStore.getOperant1(), loadStore.getOperant2());
 				loadStore.setValue(result);
-				preMEM = loadStore;
+				Component.preMEM = loadStore;
+				//preMEM = loadStore;
 			}
 
 
@@ -842,7 +906,8 @@ public class MIPSsim {
 				Integer result = calculate(alu);
 				//操作结束后将值存入postALU2
 				alu.setValue(result);
-				postALU = alu;
+				//postALU = alu;
+				Component.postALU = alu;
 			}
 
 		}
@@ -856,17 +921,19 @@ public class MIPSsim {
 
 		public void mem() {
 			if (preMEM != null) {
-
 				Instruction instruction = preMEM.getInstruction();
 				Integer value = preMEM.getValue();
 				if (value != null) {
 					switch (instruction.getOperation()) {
 						case "LW" -> {
-							value = memory[(value + register[instruction.getRs()] - dataAddr) / 4];
-							postMEM.setInstruction(instruction).setValue(value);
+							value = memory[(value - dataAddr) / 4];
+							preMEM.setValue(value);
+							//postMEM = preMEM;
+							Component.postMEM = preMEM;
+							preMEM = null;
 						}
 						case "SW" -> {
-							memory[(value + register[instruction.getRs()] - dataAddr) / 4] = register[instruction.getRt()];
+							memory[(value - dataAddr) / 4] = register[preMEM.getDest()];
 						}
 					}
 				}
@@ -874,6 +941,7 @@ public class MIPSsim {
 		}
 
 		public void wb() {
+			//TODO:释放锁的时候需要考虑取指和发射时对锁的判断
 			if (null != postMEM) {
 				int value = postMEM.getValue();
 				Integer dest = postMEM.getDest();
@@ -888,8 +956,45 @@ public class MIPSsim {
 				freeRegisterStatus(dest);
 				postALU = null;
 			}
+			update();
 		}
 
+		private void update() {
+			if (Component.waitingInstruction != null) {
+				this.ifUnit.waiting = Component.waitingInstruction;
+				Component.waitingInstruction = null;
+			}
+
+			if (Component.executed != null) {
+				this.ifUnit.executed = Component.executed;
+				Component.executed = null;
+			}
+
+			while (!Component.preIssue.isEmpty()) {
+				this.preIssue.add(Component.preIssue.poll());
+			}
+
+			while (!Component.preALU1.isEmpty()) {
+				this.preALU1.offer(Component.preALU1.poll());
+			}
+			if (Component.preMEM != null) {
+				this.preMEM = Component.preMEM;
+				Component.preMEM = null;
+			}
+			if (Component.postMEM != null) {
+				this.postMEM = Component.postMEM;
+				Component.postMEM = null;
+			}
+			while (!Component.preALU2.isEmpty()) {
+				this.preALU2.offer(Component.preALU2.poll());
+			}
+
+			if (Component.postALU != null) {
+				this.postALU = Component.postALU;
+				Component.postALU = null;
+			}
+
+		}
 
 
 		private void writeToRegister(Integer id, Integer value) {
@@ -944,11 +1049,11 @@ public class MIPSsim {
 
 			public static String getIfUnit(Instruction waiting, Instruction executed) {
 				if (waiting != null && executed != null) {
-					return String.format(IF_UNIT, waiting.toString(), executed.toString());
+					return String.format(IF_UNIT, ' ' + waiting.toString(), ' ' + executed.toString());
 				} else if (waiting != null) {
-					return String.format(IF_UNIT, waiting.toString(), "");
+					return String.format(IF_UNIT, ' ' + waiting.toString(), "");
 				} else if (executed != null) {
-					return String.format(IF_UNIT, "", executed.toString());
+					return String.format(IF_UNIT, "", ' ' + executed.toString());
 				}
 				return String.format(IF_UNIT, "", "");
 			}
@@ -1223,7 +1328,6 @@ class Instruction {
 		return "[" + instruction + "]";
 	}
 }
-
 
 final class Category {
 	public static Map<String, Integer> categorySet;
