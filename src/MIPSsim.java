@@ -64,7 +64,7 @@ public class MIPSsim {
 			//return simulator.simulate();
 			Pipeline pipeline = new Pipeline(data, instructions);
 			String simulate = pipeline.simulate();
-			System.out.println(simulate);
+			//System.out.println(simulate);
 			return simulate;
 		}
 		return "";
@@ -393,16 +393,30 @@ public class MIPSsim {
 				this.waiting = null;
 			}
 
+			/**
+			 * 判断branch指令与preIssue内的指令是否有冲突
+			 *
+			 * @return
+			 */
 			boolean hasHazards() {
 				if (waiting != null) {
+					boolean[] status = getPreIssueRegisterStatus();
 					Integer rs = waiting.getRs(),
 							rt = waiting.getRt();
 					switch (waiting.getOperation()) {
+						case "J" -> {
+							return false;
+						}
 						case "JR", "BLTZ", "BGTZ" -> {
-							if (hasDataHazards(rs)) return true;
+							if (hasDataHazards(rs)
+									|| hasDataHazardsWithPreIssue(rs, status))
+								return true;
 						}
 						case "BEQ" -> {
-							if (hasDataHazards(rs) || hasDataHazards(rt)) return true;
+							if (hasDataHazards(rs)
+									|| hasDataHazards(rt)
+									|| hasDataHazardsWithPreIssue(rs, status)
+									|| hasDataHazardsWithPreIssue(rt, status)) return true;
 						}
 					}
 				}
@@ -413,6 +427,8 @@ public class MIPSsim {
 		private int dataAddr;
 
 		private static class Component {
+			public static Boolean IF = null;
+
 			public static Instruction waitingInstruction = null;
 
 			public static Instruction executed;
@@ -481,7 +497,8 @@ public class MIPSsim {
 
 			public void setDest(Integer dest) {
 				this.dest = dest;
-				registerStatus[dest] = true;
+				if(!"SW".equals(instruction.getOperation()))
+					registerStatus[dest] = true;
 			}
 
 			public Integer getValue() {
@@ -526,7 +543,7 @@ public class MIPSsim {
 
 		public String simulate() {
 			StringBuilder builder = new StringBuilder();
-			while (!BREAK && cycle < 29) {
+			while (!BREAK) {
 				instuctionFetch();
 
 				issue();
@@ -536,23 +553,9 @@ public class MIPSsim {
 				mem();
 
 				wb();
-				/**
-				 *
-				 * fetch
-				 *
-				 * issue
-				 *
-				 * mem
-				 *
-				 * wb
-				 *
-				 * alu
-				 *
-				 *
-				 * */
 
 				String temp = print();
-				System.out.println(temp);
+				//System.out.println(temp);
 				builder.append(temp);
 				cycle++;
 			}
@@ -585,20 +588,19 @@ public class MIPSsim {
 		 * 所有的J Type指令、BREAK、NOP都不会进入到preIssue
 		 */
 		public void instuctionFetch() {
-			executeJ();
 			if (IF) {
-				if (preIssue.size() + Component.preIssue.size() <= 4) {
+				if (preIssue.size() + Component.preIssue.size() < 4) {
 					Instruction instruction1 = this.instructions.get(next());
 					Instruction instruction2 = null;
 					if (!isJType(instruction1)) {
 						Component.preIssue.offer(instruction1);
 						//preIssue.add(instruction1);
-						if (preIssue.size() + Component.preIssue.size() <= 4) {
+						if (preIssue.size() + Component.preIssue.size() < 4) {
 							instruction2 = this.instructions.get(next());
 							if (null != instruction2 && isJType(instruction2)) {
 								//如果第二条指令是J Type，那么也留在IF Unit
-								//ifUnit.waiting = instruction2;
-								Component.waitingInstruction = instruction2;
+								ifUnit.waiting = instruction2;
+								//Component.waitingInstruction = instruction2;
 								IF = false;
 							} else {
 								Component.preIssue.offer(instruction2);
@@ -607,12 +609,14 @@ public class MIPSsim {
 						}
 					} else {
 						//如果第一条指令是跳转指令，那么直接留在IF Unit
-						//ifUnit.waiting = instruction1;
-						Component.waitingInstruction = instruction1;
+						ifUnit.waiting = instruction1;
+						//Component.waitingInstruction = instruction1;
 						IF = false;
 					}
 				}
 			}
+			executeJ();
+
 			//  issue: ADD R1, R0, R0
 
 			// mem: ADD R1, R2, R3
@@ -620,41 +624,45 @@ public class MIPSsim {
 		}
 
 		private void executeJ() {
+			ifUnit.executed = null;
 			if (ifUnit.hasHazards()) {
 				return;
-			}
-			if (ifUnit.waiting != null) {
-				Component.executed = ifUnit.waiting;
+			} else {
+				ifUnit.executed = ifUnit.waiting;
 				ifUnit.waiting = null;
 			}
+			/*if (ifUnit.waiting != null) {
+				Component.executed = ifUnit.waiting;
+				ifUnit.waiting = null;
+			}*/
 			if (ifUnit.executed != null) {
 				Integer rs = ifUnit.executed.getRs(),
 						rt = ifUnit.executed.getRt();
 				if ("J".equals(ifUnit.executed.getOperation())) {
 					this.PC = ifUnit.executed.getTarget();
-					ifUnit.executed = null;
+
 					IF = true;
 				} else if (!hasDataHazards(rs)) {
-					IF = true;
+					Component.IF = true;
 					Integer value = ifUnit.executed.getValue();
 					switch (ifUnit.executed.getOperation()) {
 						case "BLTZ" -> {
 							if (register[rs] < 0) {
 								PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
-								IF = true;
+								Component.IF = true;
 							}
 						}
 						case "BGTZ" -> {
 							if (register[rs] > 0) {
 								PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
-								IF = true;
+								Component.IF = true;
 							}
 						}
 						case "BEQ" -> {
 							if (!hasDataHazards(rt)) {
 								if (register[rs].equals(register[rt])) {
 									PC += Integer.parseUnsignedInt(Util.signedExtend(Util.int2String(value, 18), 32), 2);
-									IF = true;
+									Component.IF = true;
 								}
 							}
 						}
@@ -662,10 +670,23 @@ public class MIPSsim {
 							BREAK = true;
 						}
 					}
-					ifUnit.executed = null;
+
 				}
 			}
 
+		}
+
+		private boolean[] getPreIssueRegisterStatus() {
+			boolean[] status = new boolean[32];
+			preIssue.forEach(issue -> {
+				Integer rs = issue.getRs(),
+						rt = issue.getRt(),
+						rd = issue.getRd();
+				if (rs != null) status[rs] = true;
+				if (rt != null) status[rt] = true;
+				if (rd != null) status[rd] = true;
+			});
+			return status;
 		}
 
 		private boolean isJType(Instruction instruction) {
@@ -764,6 +785,15 @@ public class MIPSsim {
 			}
 		}
 
+		private boolean hasDataHazardsWithPreIssue(Integer id, boolean[] status) {
+			for (int i = 0; i < status.length; i++) {
+				if (id != null && status[id]) {
+					return true;
+				}
+			}
+			return false;
+		}
+
 		/**
 		 * 判断待发射指令前后是否有数据风险
 		 * <p>
@@ -816,6 +846,7 @@ public class MIPSsim {
 					rt = issuing.getRt(),
 					rd = issuing.getRd(),
 					sa = issuing.getShift();
+			boolean flag = false;
 			//寄存器被占用，则有数据风险
 			//首先判断该寄存器能不能发射
 			//如果registerStatus有加锁，那么就不能发射
@@ -823,26 +854,33 @@ public class MIPSsim {
 				case "ADD", "SUB", "MUL", "AND", "OR", "XOR", "NOR", "SLT" -> {
 					if (hasDataHazards(rd) || hasDataHazards(rs) || hasDataHazards(rt)
 							|| hasRegisterHazards(rd) || hasRegisterHazards(rs) || hasRegisterHazards(rt)) {
-						insRegisterStatus[rd] = true;
-						return true;
+
+						flag = true;
 					}
+					insRegisterStatus[rd] = true;
+					insRegisterStatus[rs] = true;
+					insRegisterStatus[rt] = true;
 				}
 				case "SW", "LW", "ADDI", "ANDI", "ORI", "XORI" -> {
 					if (hasDataHazards(rs) || hasDataHazards(rt)
 							|| hasRegisterHazards(rs) || hasRegisterHazards(rt)) {
-						insRegisterStatus[rt] = true;
-						return true;
+						//insRegisterStatus[rt] = true;
+						//insRegisterStatus[rs] = true;
+						flag = true;
 					}
+					insRegisterStatus[rt] = true;
+					insRegisterStatus[rs] = true;
 				}
 				case "SLL", "SRL", "SRA" -> {
 					if (hasDataHazards(rt) || hasDataHazards(rd)
 							|| hasRegisterHazards(rt) || hasRegisterHazards(rd)) {
-						insRegisterStatus[rd] = true;
-						return true;
+						flag = true;
 					}
+					insRegisterStatus[rd] = true;
+					insRegisterStatus[rt] = true;
 				}
 			}
-			return false;
+			return flag;
 		}
 
 		/**
@@ -898,7 +936,6 @@ public class MIPSsim {
 				//preMEM = loadStore;
 			}
 
-
 			//ALU2 一次只能从preALU2中取一条
 			if (!preALU2.isEmpty()) {
 				Buffer alu = preALU2.poll();
@@ -934,6 +971,7 @@ public class MIPSsim {
 						}
 						case "SW" -> {
 							memory[(value - dataAddr) / 4] = register[preMEM.getDest()];
+							preMEM = null;
 						}
 					}
 				}
@@ -947,6 +985,7 @@ public class MIPSsim {
 				Integer dest = postMEM.getDest();
 				writeToRegister(dest, value);
 				freeRegisterStatus(dest);
+				//System.out.println("Free Register: " + dest);
 				postMEM = null;
 			}
 			if (null != postALU) {
@@ -954,12 +993,17 @@ public class MIPSsim {
 				Integer dest = postALU.getDest();
 				writeToRegister(dest, value);
 				freeRegisterStatus(dest);
+				//System.out.println("Free Register: " + dest);
 				postALU = null;
 			}
 			update();
 		}
 
 		private void update() {
+			if (Component.IF != null) {
+				IF = Component.IF;
+				Component.IF = null;
+			}
 			if (Component.waitingInstruction != null) {
 				this.ifUnit.waiting = Component.waitingInstruction;
 				Component.waitingInstruction = null;
@@ -1002,8 +1046,8 @@ public class MIPSsim {
 		}
 
 		public Integer next() {
-			int next = (PC - BASE) / 8;
-			PC += 8;
+			int next = (PC - BASE) / 4;
+			PC += 4;
 			return next;
 		}
 
