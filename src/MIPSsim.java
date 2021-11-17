@@ -1188,8 +1188,8 @@ public class MIPSsim {
 		try {
 			List<String> sample = Files.readAllLines(sampleInput, Charset.defaultCharset());
 			String disassembly = simulator.disassemble(sample);
-			Path assembly = Paths.get("./disassembly.txt");
-			Files.writeString(assembly, disassembly);
+			//Path assembly = Paths.get("./disassembly.txt");
+			//Files.writeString(assembly, disassembly);
 			String simulation = simulator.simulate();
 			Path simulated = Paths.get("./simulation.txt");
 			Files.writeString(simulated, simulation);
